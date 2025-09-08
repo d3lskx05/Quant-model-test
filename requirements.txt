@@ -1,0 +1,8 @@
+streamlit
+transformers
+onnxruntime
+gdown
+huggingface-hub
+psutil
+numpy
+pandas
