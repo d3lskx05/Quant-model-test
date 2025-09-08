@@ -1,4 +1,5 @@
-# quant_model.py
+# universal_model.py
+
 import os
 import zipfile
 import gdown
@@ -6,121 +7,154 @@ import numpy as np
 import onnxruntime as ort
 from pathlib import Path
 from functools import lru_cache
-from transformers import AutoTokenizer
-import huggingface_hub
+from typing import List, Union
+
+from transformers import AutoTokenizer, AutoModel
+from sentence_transformers import SentenceTransformer
 
 
-class QuantModel:
+class UniversalModel:
     """
-    Универсальный загрузчик квантизированных ONNX моделей.
-    - Источники: Google Drive (gdrive), Hugging Face Hub (hf), локальная (local)
-    - Автопоиск .onnx файла
-    - Кэширование модели и эмбеддингов
+    Универсальный класс для подключения моделей:
+    - ONNX квантизованные модели (GDrive, HF, локально)
+    - Обычные модели (transformers)
+    - Модели SentenceTransformer
+
+    Поддержка кэширования в памяти.
     """
 
-    def __init__(self, model_id: str, source: str = "gdrive",
-                 model_dir: str = "onnx_model", tokenizer_name: str = None):
+    def __init__(self,
+                 model_id: str,
+                 model_type: str = "onnx",
+                 source: str = "gdrive",
+                 model_dir: str = "onnx_model",
+                 model_file: str = "model_quantized.onnx",
+                 tokenizer_name: str = None):
+        """
+        Args:
+            model_id: ID модели (GDrive ID, HF repo_id или локальный путь)
+            model_type: "onnx", "transformers", "sentence-transformers"
+            source: "gdrive", "hf", "local"
+            model_dir: Папка для локального хранения
+            model_file: ONNX файл
+            tokenizer_name: Название токенайзера (если нужно отдельно)
+        """
         self.model_id = model_id
+        self.model_type = model_type
         self.source = source
-        self.model_dir = Path(model_dir)
-        self.tokenizer_name = tokenizer_name
-        self.model_path = None
+        self.model_dir = model_dir
+        self.model_file = model_file
+        self.tokenizer_name = tokenizer_name or model_id
 
-        self._ensure_model()
-        self.session = self._load_session()
-        self.tokenizer = self._load_tokenizer()
+        self.session = None
+        self.model = None
+        self.tokenizer = None
 
-    # ========================
-    # 📥 Загрузка модели
-    # ========================
-    def _ensure_model(self):
-        """Скачивание и распаковка модели, если она не локальная."""
+        self._prepare_model()
+
+    def _prepare_model(self):
+        """Основная точка загрузки модели."""
+        if self.model_type == "onnx":
+            self._ensure_model_files()
+        self._load_model_and_tokenizer()
+
+    def _ensure_model_files(self):
+        """Скачивание и распаковка ONNX модели, если нужно."""
+        model_path = Path(self.model_dir) / self.model_file
+        if model_path.exists():
+            return  # уже есть
+
         os.makedirs(self.model_dir, exist_ok=True)
 
-        if not any(self.model_dir.glob("*.onnx")):
-            if self.source == "gdrive":
-                zip_path = f"{self.model_dir}.zip"
-                print(f"📥 Скачиваю модель с Google Drive: {self.model_id}")
-                gdown.download(f"https://drive.google.com/uc?id={self.model_id}", zip_path, quiet=False)
-                print(f"📦 Распаковка {zip_path}...")
-                with zipfile.ZipFile(zip_path, "r") as zf:
-                    zf.extractall(self.model_dir)
-                os.remove(zip_path)
+        if self.source == "gdrive":
+            zip_path = f"{self.model_dir}.zip"
+            print(f"📥 Скачиваю модель с Google Drive: {self.model_id}")
+            gdown.download(f"https://drive.google.com/uc?id={self.model_id}", zip_path, quiet=False)
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(self.model_dir)
+            os.remove(zip_path)
 
-            elif self.source == "hf":
-                print(f"📥 Скачиваю модель с Hugging Face: {self.model_id}")
-                huggingface_hub.snapshot_download(
-                    repo_id=self.model_id,
-                    local_dir=self.model_dir,
-                    local_dir_use_symlinks=False
-                )
+        elif self.source == "hf":
+            from huggingface_hub import snapshot_download
+            print(f"📥 Скачиваю модель с HF Hub: {self.model_id}")
+            snapshot_download(repo_id=self.model_id, local_dir=self.model_dir, local_dir_use_symlinks=False)
 
-            elif self.source == "local":
-                print(f"📂 Использую локальную модель: {self.model_dir}")
-            else:
-                raise ValueError(f"❌ Неизвестный источник: {self.source}")
+        elif self.source == "local":
+            print(f"📂 Использую локальную модель из {self.model_dir}")
 
-        # Ищем первый .onnx
-        onnx_files = list(self.model_dir.rglob("*.onnx"))
-        if not onnx_files:
-            raise FileNotFoundError(f"❌ В {self.model_dir} не найден .onnx файл!")
-        self.model_path = onnx_files[0]
-        print(f"✅ Найден ONNX файл: {self.model_path}")
+        else:
+            raise ValueError(f"❌ Неизвестный source: {self.source}")
 
-    # ========================
-    # 🚀 Загрузка ONNX Session
-    # ========================
-    def _load_session(self):
-        so = ort.SessionOptions()
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        providers = ["CPUExecutionProvider"]
-        try:
-            if ort.get_device() == "GPU":
-                providers.insert(0, "CUDAExecutionProvider")
-        except Exception:
-            pass
-        print(f"🚀 Загружаю модель на провайдерах: {providers}")
-        return ort.InferenceSession(str(self.model_path), sess_options=so, providers=providers)
+        print("✅ Модель скачана и готова!")
 
-    # ========================
-    # 📝 Загрузка токенайзера
-    # ========================
-    def _load_tokenizer(self):
-        if self.tokenizer_name:
-            return AutoTokenizer.from_pretrained(self.tokenizer_name)
-        try:
-            return AutoTokenizer.from_pretrained(str(self.model_dir))
-        except Exception:
-            print("⚠️ Токенайзер не найден в папке, используем deepvk/USER-BGE-M3")
-            return AutoTokenizer.from_pretrained("deepvk/USER-BGE-M3")
+    def _load_model_and_tokenizer(self):
+        """Загружаем модель и токенайзер в зависимости от типа."""
+        print(f"🚀 Загружаю модель типа {self.model_type}")
 
-    # ========================
-    # 🔥 Кодирование
-    # ========================
-    @lru_cache(maxsize=1024)
-    def _encode_cached(self, text: str, normalize: bool = True):
-        inputs = self.tokenizer([text], padding=True, truncation=True, return_tensors="np")
-        ort_inputs = {k: v for k, v in inputs.items()}
-        embeddings = self.session.run(None, ort_inputs)[0]
+        if self.model_type == "onnx":
+            model_path = str(Path(self.model_dir) / self.model_file)
+            self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
 
-        if normalize:
-            norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-10
-            embeddings = embeddings / norms
-        return embeddings[0]
+        elif self.model_type == "transformers":
+            self.model = AutoModel.from_pretrained(self.model_id)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
 
-    def encode(self, texts, normalize=True):
+        elif self.model_type == "sentence-transformers":
+            self.model = SentenceTransformer(self.model_id)
+
+        else:
+            raise ValueError(f"❌ Неизвестный тип модели: {self.model_type}")
+
+        print("✅ Модель загружена!")
+
+    def encode(self, texts: Union[str, List[str]], normalize_embeddings=True) -> np.ndarray:
+        """Кодируем текст в эмбеддинги."""
         if isinstance(texts, str):
             texts = [texts]
-        return np.array([self._encode_cached(t, normalize) for t in texts])
+
+        if self.model_type == "onnx":
+            inputs = self.tokenizer(texts, padding=True, truncation=True, return_tensors="np")
+            ort_inputs = {k: v for k, v in inputs.items()}
+            embeddings = self.session.run(None, ort_inputs)[0]
+            embeddings = embeddings.mean(axis=1)
+
+        elif self.model_type == "transformers":
+            import torch
+            self.model.eval()
+            inputs = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+
+        elif self.model_type == "sentence-transformers":
+            embeddings = self.model.encode(texts, convert_to_numpy=True)
+
+        else:
+            raise ValueError(f"❌ Неизвестный тип модели: {self.model_type}")
+
+        if normalize_embeddings:
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-10
+            embeddings = embeddings / norms
+        return embeddings
 
 
-# ========================
-# 🔗 Глобальный доступ
-# ========================
+# =========================
+# 🔹 Глобальный доступ к модели
+# =========================
 @lru_cache(maxsize=1)
 def get_model():
+    """Возвращает загруженную модель (с кэшем в памяти)."""
     model_id = os.getenv("MODEL_ID", "1lkrvCPIE1wvffIuCSHGtbEz3Epjx5R36")
+    model_type = os.getenv("MODEL_TYPE", "onnx")
     source = os.getenv("MODEL_SOURCE", "gdrive")
     model_dir = os.getenv("MODEL_DIR", "onnx-user-bge-m3")
-    tokenizer = os.getenv("TOKENIZER_NAME", None)
-    return QuantModel(model_id, source, model_dir, tokenizer)
+    tokenizer_name = os.getenv("TOKENIZER_NAME", "deepvk/USER-BGE-M3")
+
+    return UniversalModel(
+        model_id=model_id,
+        model_type=model_type,
+        source=source,
+        model_dir=model_dir,
+        tokenizer_name=tokenizer_name
+    )
