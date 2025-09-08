@@ -1,5 +1,6 @@
 streamlit
 transformers
+sentence_transformers
 onnxruntime
 gdown
 huggingface-hub
