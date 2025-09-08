@@ -44,6 +44,7 @@ class UniversalModel:
         self.session = None
         self.tokenizer = None
 
+        print(f"🔍 Инициализация UniversalModel: type={model_type}, source={source}")
         self._prepare()
 
     # ========================
@@ -51,14 +52,17 @@ class UniversalModel:
     # ========================
     def _prepare(self):
         if self.model_type == "onnx":
+            print("🔹 Режим: ONNX модель")
             self._ensure_model_files()
             self.model_path = self._find_onnx_file()
             self.session = self._load_onnx_session()
             self.tokenizer = self._load_tokenizer()
         elif self.model_type == "transformers":
+            print("🔹 Режим: Transformers модель")
             self.model = AutoModel.from_pretrained(self.model_id)
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
         elif self.model_type == "sentence-transformers":
+            print("🔹 Режим: Sentence-Transformers модель")
             self.model = SentenceTransformer(self.model_id)
         else:
             raise ValueError(f"❌ Неизвестный тип модели: {self.model_type}")
@@ -75,7 +79,8 @@ class UniversalModel:
                 gdown.download(f"https://drive.google.com/uc?id={self.model_id}", zip_path, quiet=False)
                 with zipfile.ZipFile(zip_path, "r") as zf:
                     zf.extractall(self.model_dir)
-                os.remove(zip_path)
+                if os.path.exists(zip_path):  # ✅ Безопасное удаление
+                    os.remove(zip_path)
             elif self.source == "hf":
                 print(f"📥 Скачиваю модель с Hugging Face: {self.model_id}")
                 huggingface_hub.snapshot_download(
@@ -87,6 +92,8 @@ class UniversalModel:
                 print(f"📂 Использую локальную модель: {self.model_dir}")
             else:
                 raise ValueError(f"❌ Неизвестный источник: {self.source}")
+        else:
+            print(f"✅ Файлы модели уже есть в {self.model_dir}")
 
     def _find_onnx_file(self):
         onnx_files = list(self.model_dir.rglob("*.onnx"))
