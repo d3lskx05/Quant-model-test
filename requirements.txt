@@ -1,9 +1,6 @@
 streamlit
 transformers
-sentence_transformers
 onnxruntime
-gdown
-huggingface-hub
-psutil
+huggingface_hub
+torch
 numpy
-pandas
