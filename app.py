@@ -1,25 +1,77 @@
+# app.py
 import streamlit as st
+import torch
 import numpy as np
-from quant_model import get_model
+from transformers import AutoTokenizer, AutoModel
+from quant_model import QuantModel
 
-st.set_page_config(page_title="Quantized Model Demo", layout="wide")
-st.title("⚡ Быстрое подключение квантизированной модели")
 
-# Загружаем модель (кэшируется)
-model = get_model()
-st.success("✅ Модель загружена и готова!")
+# =============================
+# ⚡ Загружаем модели
+# =============================
 
-# Текстовое поле
-text_input = st.text_area(
-    "Введите текст(ы) для кодирования (по одному на строку):",
-    "Привет, мир!\nЭто тестовое предложение."
-)
+@st.cache_resource
+def load_models():
+    # Оригинальная FP32 модель
+    orig_id = "deepvk/USER-bge-m3"
+    orig_tokenizer = AutoTokenizer.from_pretrained(orig_id)
+    orig_model = AutoModel.from_pretrained(orig_id)
 
-# Кнопка запуска
-if st.button("🚀 Получить эмбеддинги"):
-    texts = [t.strip() for t in text_input.split("\n") if t.strip()]
-    embeddings = model.encode(texts)
+    # Квантованная INT8 модель
+    quant = QuantModel("skatzR/USER-BGE-M3-ONNX-INT8")
 
-    st.subheader("🔢 Результат")
-    st.write(f"Размер эмбеддингов: {embeddings.shape}")
-    st.json(embeddings[0][:10].tolist())
+    return orig_tokenizer, orig_model, quant
+
+
+orig_tokenizer, orig_model, quant_model = load_models()
+
+
+# =============================
+# ⚡ Утилиты
+# =============================
+
+def mean_pooling(model_output, attention_mask):
+    token_embeddings = model_output[0]
+    mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    return (token_embeddings * mask).sum(1) / torch.clamp(mask.sum(1), min=1e-9)
+
+
+def encode_orig(texts):
+    inputs = orig_tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
+    with torch.no_grad():
+        outputs = orig_model(**inputs)
+    emb = mean_pooling(outputs, inputs["attention_mask"])
+    emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+    return emb.cpu().numpy()
+
+
+# =============================
+# ⚡ Streamlit UI
+# =============================
+
+st.title("🧩 DeepVK-BGE-M3 — FP32 vs Quantized ONNX")
+st.write("Сравнение эмбеддингов оригинальной и квантованной модели")
+
+text1 = st.text_input("Текст 1", "Привет, мир!")
+text2 = st.text_input("Текст 2", "Hello, world!")
+
+if st.button("🔎 Проверить"):
+    texts = [text1, text2]
+
+    # FP32
+    emb_orig = encode_orig(texts)
+
+    # INT8 ONNX
+    emb_quant = quant_model.encode(texts)
+
+    # Cosine similarity внутри моделей
+    sim_orig = float(np.dot(emb_orig[0], emb_orig[1]))
+    sim_quant = float(np.dot(emb_quant[0], emb_quant[1]))
+
+    # Cosine similarity между моделями
+    cross_sim = float(np.dot(emb_orig[0], emb_quant[0]))
+
+    st.subheader("📐 Cosine Similarities")
+    st.write(f"**FP32 model:** {sim_orig:.4f}")
+    st.write(f"**Quantized INT8 model:** {sim_quant:.4f}")
+    st.write(f"**FP32 vs INT8 (cross-check):** {cross_sim:.4f}")
